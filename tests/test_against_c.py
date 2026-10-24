@@ -126,6 +126,30 @@ class OriginalCParity(unittest.TestCase):
             with self.subTest(escape=escape):
                 self.compare('10 PRINT "' + escape + '"')
 
+    def test_original_c_and_python_reject_same_lexical_errors(self):
+        # C returns zero even after a diagnostic: inspect stderr, not its code.
+        failures = (
+            '10 PRINT "unfinished', '10 PRINT (2+3',
+            '10 PRINT BIN 11111111111111111',
+            '10 LET a=PRINT 3',
+            '10 PRINT AT my,mx;" ":IF RND >skTHEN PRINT AT my1,mx1',
+            '10 PRINT "{T}"\n20 SPECTRUM',
+            '10 PLAY "A"\n20 PRINT "{U}"',
+            '10 PRINT 1\n5 PRINT 2',
+        )
+        for n, listing in enumerate(failures):
+            with self.subTest(index=n, listing=listing):
+                p = self.temp / 'input.bas'
+                q = self.temp / 'output.tap'
+                p.write_text(listing, encoding='ascii')
+                q.unlink(missing_ok=True)
+                c_run = subprocess.run([str(self.c_bin), '-n', '-w', '-q',
+                                        str(p), str(q)], capture_output=True, text=True)
+                self.assertIn('ERROR', c_run.stderr.upper(),
+                              f'C unexpectedly accepted {listing!r}')
+                with self.assertRaises(BAS2TAPError):
+                    convert(listing)
+
     def test_case_insensitive_keywords(self):
         for src in ('10 print 1', '10 let a=val "3"', '10 for i=1 to 3:next i'):
             with self.subTest(src=src):
