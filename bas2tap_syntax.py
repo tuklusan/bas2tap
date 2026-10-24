@@ -210,6 +210,7 @@ class _Parser:
         result_type = None
         expect_operand = True
         has_operand = False
+        last_parenthetical = False
         while True:
             b = self.cur()
             if b in (13,58,41,44,59,39,0xCC,0xCD,0xCB) or (b in (0xC5,0xC6) and not has_operand):
@@ -229,6 +230,7 @@ class _Parser:
                         self.fail('Type conflict in expression')
                     continue
                 item_type = self.atom(keyword)
+                last_parenthetical = b == 40 and item_type is True
                 if typename is not None and item_type != typename:
                     self.fail('Type conflict in expression')
                 typename = item_type
@@ -257,12 +259,13 @@ class _Parser:
                 if b == 0xC5:
                     if keyword == 0xC6 and typename is False and result_type is not True:
                         self.fail('AND requires numeric right value')
-                    if result_type is not True and keyword != 0xC6:
+                    if result_type is not True and keyword != 0xC6 and not last_parenthetical:
                         self.fail('OR requires numeric left value')
                 right_type = self.expr(keyword=b)
                 if not right_type:
                     self.fail('AND/OR requires numeric right value')
-                return (typename is not False or b == 0xC5)
+                left_type = result_type if result_type is not None else typename
+                return (left_type is not False or b == 0xC5)
             else:
                 return result_type if result_type is not None else typename
 
