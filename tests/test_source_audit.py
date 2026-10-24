@@ -20,8 +20,7 @@ def original_keywords():
     rows=[]
     for word,kind,params in pattern.findall(table):
         cls=[]
-        for field in params.split(','):
-            value=field.strip()
+        for value in re.findall(r"'[^']'|0x[0-9A-Fa-f]+|[0-9]+",params):
             if not value or value=='0':
                 continue
             if re.fullmatch(r"'[^']'",value):

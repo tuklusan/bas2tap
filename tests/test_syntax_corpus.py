@@ -44,7 +44,7 @@ class CorpusParity(unittest.TestCase):
             tzx=game/'BASIC'/(game.name+'.tzx')
             text=bas.read_text(encoding='ascii')
             tape=subprocess.run([sys.executable,str(self.converter),str(tzx)],
-                                capture_output=True,text=True,timeout=20)
+                                capture_output=True,text=True,encoding='latin-1',errors='replace',timeout=20)
             if tape.returncode:
                 problems.append((game.name,'TZX extraction error',tape.stderr[:160]))
                 continue
@@ -56,7 +56,7 @@ class CorpusParity(unittest.TestCase):
                 for with_syntax in (False,True):
                     dst.unlink(missing_ok=True)
                     cmd=[str(self.cbin),'-q','-w'] + ([] if with_syntax else ['-n']) + [str(src),str(dst)]
-                    r=subprocess.run(cmd,capture_output=True,text=True,timeout=20)
+                    r=subprocess.run(cmd,capture_output=True,text=True,encoding='latin-1',errors='replace',timeout=20)
                     c_ok=r.returncode==0 and 'ERROR' not in r.stderr.upper()
                     try:
                         p=convert(listing,syntax_check=with_syntax)
