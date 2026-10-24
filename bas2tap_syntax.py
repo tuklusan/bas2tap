@@ -35,7 +35,7 @@ INFIX_WORD = set(range(0xC5,0xCA))
 # Integer 1..15: class method; integer >=32: required Sinclair byte.
 GRAMMAR = {
     'SPECTRUM':(), 'PLAY':(12,), 'RND':(), 'INKEY$':(), 'PI':(),
-    'OR':(5,), 'AND':(5,),
+    'OR':(5,), 'AND':(5,), '<=':(5,), '>=':(5,), '<>':(5,),
     'FN':(1,40,13,41),'POINT':(40,8,41),'SCREEN$':(40,8,41),
     'ATTR':(40,8,41),'AT':(8,),'TAB':(6,),
     'VAL$':(10,),'CODE':(10,),'VAL':(10,),'LEN':(10,),
@@ -234,6 +234,11 @@ class _Parser:
                 typename = item_type
                 has_operand = True
                 expect_operand = False
+                # Exact C ScanExpression rule: operands to expression
+                # functions are returned after the first scanned atom.
+                # Parenthesized subexpressions were already parsed in atom.
+                if keyword in NUM_FN or keyword in STR_FN:
+                    return result_type if result_type is not None else typename
             elif b in (43,45,42,47,94):
                 if b != 43 and typename is False:
                     self.fail('Type conflict in expression')
