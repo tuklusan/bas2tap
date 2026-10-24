@@ -111,6 +111,30 @@ class ListingTests(unittest.TestCase):
     def test_blank_lines(self):
         self.assertEqual(encode_program('\n10 PRINT 1\n\n'), encode_program('10 PRINT 1'))
 
+    def test_empty_listing_has_empty_tap_like_c(self):
+        self.assertEqual(encode_program(''), b'')
+        self.assertEqual(encode_program('\n\n'), b'')
+        self.assertEqual(int.from_bytes(convert('')[14:16], 'little'), 0)
+
+    def test_invalid_controls_not_silently_treated_as_line_endings(self):
+        for text in ('10 PRINT 1\x0b20 PRINT 2', '10 PRINT 1\x1c20 PRINT 2'):
+            with self.subTest(source=text), self.assertRaisesRegex(BAS2TAPError, 'invalid character'):
+                encode_program(text)
+
+    def test_original_c_physical_buffer_limit_counts_newline(self):
+        # The C fgets buffer also counts the terminating newline.
+        with self.assertRaisesRegex(BAS2TAPError, 'buffer'):
+            encode_program('10 REM ' + 'x' * 1017 + '\n')
+
+    def test_warnings_from_original_c(self):
+        warning_lines = []
+        encode_program('\n10 PRINT "{NO}"\n10 PRINT 2', warn=warning_lines.append)
+        self.assertIn('WARNING - Skipping empty ASCII line 1', warning_lines)
+        self.assertIn('WARNING - Unexpandable sequence "{NO}" in line 10', warning_lines)
+        duplicate = []
+        encode_program('10 PRINT 1\n10 PRINT 2', warn=duplicate.append)
+        self.assertIn('WARNING - Duplicate use of line number 10', duplicate)
+
     def test_invalid_source(self):
         for source in ('PRINT "ABC"', '1 PRINT "ABC"\n0 PRINT 1',
                        '10 PRINT "£"', '10000 PRINT 1', '10', '10 PRINT 1\n5 PRINT 2'):

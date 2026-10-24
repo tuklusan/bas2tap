@@ -16,7 +16,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from bas2tap import BAS2TAPError, convert
+from bas2tap import BAS2TAPError, TOKENS, convert
 
 
 class OriginalCParity(unittest.TestCase):
@@ -82,7 +82,7 @@ class OriginalCParity(unittest.TestCase):
             '10 PRINT "UP"\n20 REM SECOND LINE\n30 PRINT 2',
             '10 PRINT "LOWER"\n20 PRINT 20\n20 PRINT 30',
             '10 PRINT 0\n20',
-            '\n\n10 PRINT 20\n\n',
+            '\n\n10 PRINT 20\n\n', '', '\n\n',
             '10 PRINT "WITH\tTAB"',
         )
         for n, listing in enumerate(listings):
@@ -101,6 +101,30 @@ class OriginalCParity(unittest.TestCase):
         for n, sample in enumerate(samples):
             with self.subTest(n=n, decimal=sample):
                 self.compare('10 PRINT ' + sample)
+
+    def test_complete_original_keyword_map(self):
+        # All 93 entries in the C TokenMap 0xA3..0xFF, not a handpicked subset.
+        for code, word in sorted(TOKENS.items()):
+            with self.subTest(token=f'{code:02X}', word=word):
+                self.compare('10 ' + word)
+
+    def test_all_graphics_and_literal_byte_escapes(self):
+        for byte in range(256):
+            with self.subTest(char=byte):
+                self.compare(f'10 PRINT "{{{byte:02X}}}"')
+        for glyph in 'ABCDEFGHIJKLMNOPQRSTU':
+            with self.subTest(udg=glyph):
+                self.compare(f'10 PRINT "{{{glyph}}}"')
+        for sign in '+-':
+            for number in range(1, 9):
+                with self.subTest(graphic=sign + str(number)):
+                    self.compare(f'10 PRINT "{{{sign}{number}}}"')
+        for escape in ('{INK 1}', '{PAPER 2}', '{FLASH 1}',
+                       '{BRIGHT 1}', '{INVERSE 1}', '{OVER 1}',
+                       '{AT 3,5}', '{TAB 2,4}', '{(C)}', '{CODE}', '{CAT}',
+                       '{MALFORMED}', '{PAPER 256}', '{AT 255,255}'):
+            with self.subTest(escape=escape):
+                self.compare('10 PRINT "' + escape + '"')
 
     def test_case_insensitive_keywords(self):
         for src in ('10 print 1', '10 let a=val "3"', '10 for i=1 to 3:next i'):
