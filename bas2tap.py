@@ -235,13 +235,63 @@ def _match(text: str, pos: int, case_insensitive: bool) -> tuple[int, int] | Non
     return None
 
 
+def _source_identifier(text: str, pos: int) -> tuple[bytes, int] | None:
+    """ZX-Basicus' VARNAME terminal: a name, not a token-map prefix.
+
+    Scalar names may be longer than one character. Variable occurrences in
+    Sinclair 48K BASIC cannot be determined by keyword spelling alone.
+    """
+    if pos >= len(text) or not text[pos].isascii() or not text[pos].isalpha():
+        return None
+    end = pos + 1
+    while end < len(text) and text[end].isascii() and text[end].isalnum():
+        end += 1
+    if end < len(text) and text[end] == '$':
+        end += 1
+    return text[pos:end].encode('ascii'), end
+
+
+def _print_at_control(text: str, pos: int, statement: int | None,
+                      brackets: int, print_boundary: bool) -> bool:
+    """AT is an I/O control only in PRINT/INPUT print-item positions.
+
+    Grammar reference: ZX-Basicus' printcontrol/loccontrol productions.
+    A variable spelled AT is legal in LET and ordinary expressions. Requiring
+    a following expression, comma and second expression avoids treating
+    'PRINT AT;' or 'PRINT AT+1' as a position control.
+    """
+    if statement not in (0xF5, 0xEE, 0xE0) or brackets or not print_boundary:
+        return False
+    rest = text[pos + 2:]
+    if not rest or rest[0] != ' ':
+        return False
+    rest = rest.lstrip(' ')
+    if not rest or rest[0] in ',;:':
+        return False
+    quoted = False
+    depth = 0
+    for index, ch in enumerate(rest):
+        if ch == '"':
+            quoted = not quoted
+        elif not quoted:
+            if ch == '(':
+                depth += 1
+            elif ch == ')':
+                depth -= 1
+            elif ch == ',' and depth == 0:
+                return bool(rest[:index].strip() and rest[index + 1:].strip(' ;:'))
+            elif ch in ';:' and depth == 0:
+                return False
+    return False
+
+
 def tokenize_line(text: str, *, line_number: int = 10, case_insensitive: bool = False,
                   _mode: dict | None = None,
                   _warn: Callable[[str], None] | None = None) -> bytes:
     """BAS2TAP C's lexical logic, returning one encoded BASIC body + CR.
 
-    Syntax-checking is opt-in at the Python library boundary, and on by
-    default at the CLI boundary. RBC additionally requires original ROM validation.
+    Expression and variable positions follow Sinclair 48K grammar, while
+    the original ROM remains authoritative for syntax validation.
     """
     if not text.isascii():
         raise BAS2TAPError(f'Line {line_number}: non-ASCII BASIC')
@@ -253,6 +303,9 @@ def tokenize_line(text: str, *, line_number: int = 10, case_insensitive: bool = 
     brackets = 0
     subline = 1
     def_fn = inside_fn = False
+    statement = None
+    variable_required = False
+    print_boundary = False
     while pos < len(text):
         c = text[pos]
         if in_string:
@@ -292,6 +345,13 @@ def tokenize_line(text: str, *, line_number: int = 10, case_insensitive: bool = 
             encoded.append(token)
             if token != 58:
                 expect_keyword = False
+                statement = token
+                variable_required = token in (0xF1, 0xEB, 0xF3, 0xE9, 0xE3, 0xCE)
+                print_boundary = token in (0xF5, 0xEE, 0xE0)
+            else:
+                statement = None
+                variable_required = False
+                print_boundary = False
             if token == 0xCE:
                 def_fn, inside_fn = True, False
             if token == 0xEA:
@@ -325,7 +385,24 @@ def tokenize_line(text: str, *, line_number: int = 10, case_insensitive: bool = 
             encoded.extend(b'\x0e\0\0\0\0\0,')
             pos += 1
             continue
+        # ZX-Basicus' LET/FOR/NEXT/DIM/READ/DEF FN grammar positions require
+        # VARNAME. A word that spells a ROM token is still a variable there.
+        name = _source_identifier(text, pos)
+        if name and variable_required:
+            value, pos = name
+            encoded.extend(value)
+            variable_required = False
+            print_boundary = False
+            continue
         hit = _match(text, pos, case_insensitive)
+        if hit and hit[0] == 0xAC and name and not _print_at_control(
+                text, pos, statement, brackets, print_boundary):
+            # AT is not an ordinary expression function. Outside an I/O
+            # control it must be the letters of a variable name.
+            value, pos = name
+            encoded.extend(value)
+            print_boundary = False
+            continue
         if hit:
             token, pos = hit
             if token in (0xA3, 0xA4):
@@ -338,12 +415,16 @@ def tokenize_line(text: str, *, line_number: int = 10, case_insensitive: bool = 
             if token in (58, 0xCB):
                 expect_keyword = True
                 def_fn = False
+                variable_required = False
+                statement = None
+                print_boundary = False
                 if brackets:
                     raise BAS2TAPError(f'Line {line_number}: unclosed brackets before separator')
                 subline += 1
                 if subline > 127:
                     raise BAS2TAPError(f'Line {line_number}: too many statements')
             elif token == 0xC4:
+                print_boundary = False
                 value = 0
                 while pos < len(text) and text[pos] in '01':
                     value = value * 2 + int(text[pos])
@@ -352,8 +433,11 @@ def tokenize_line(text: str, *, line_number: int = 10, case_insensitive: bool = 
                     encoded.append(ord(text[pos]))
                     pos += 1
                 encoded.extend((14, 0, 0, value & 255, value >> 8, 0))
+            if token not in (58, 0xCB, 0xC4):
+                print_boundary = False
             continue
         if c in '0123456789.':
+            print_boundary = False
             literal, pos = _number_at(text, pos, line_number)
             encoded.extend(literal)
             continue
@@ -362,6 +446,7 @@ def tokenize_line(text: str, *, line_number: int = 10, case_insensitive: bool = 
             value, pos = expansion
             encoded.extend(value)
         elif c.isalpha():
+            print_boundary = False
             # The C converter copies complete alphanumeric identifiers in one
             # operation. Embedded keywords do NOT start inside a variable.
             end = pos + 1
@@ -371,6 +456,12 @@ def tokenize_line(text: str, *, line_number: int = 10, case_insensitive: bool = 
             pos = end
         else:
             encoded.append(ord(c))
+            if c in ",;'":
+                print_boundary = statement in (0xF5, 0xEE, 0xE0) and brackets == 0
+                if c == ',' and statement == 0xE3 and brackets == 0:
+                    variable_required = True
+            elif c != ' ':
+                print_boundary = False
             pos += 1
     if in_string:
         raise BAS2TAPError(f'Line {line_number}: unclosed string')
