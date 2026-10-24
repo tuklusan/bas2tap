@@ -240,8 +240,8 @@ def tokenize_line(text: str, *, line_number: int = 10, case_insensitive: bool = 
                   _warn: Callable[[str], None] | None = None) -> bytes:
     """BAS2TAP C's lexical logic, returning one encoded BASIC body + CR.
 
-    This is a tokenizer, not a BASIC syntax validator. Syntax should be
-    checked by the Spectrum ROM, or the C program when comparing fixtures.
+    Syntax-checking is opt-in at the Python library boundary, and on by
+    default at the CLI boundary. RBC additionally requires original ROM validation.
     """
     if not text.isascii():
         raise BAS2TAPError(f'Line {line_number}: non-ASCII BASIC')
@@ -383,7 +383,8 @@ def tokenize_line(text: str, *, line_number: int = 10, case_insensitive: bool = 
 
 
 def encode_program(listing: str, *, case_insensitive: bool = False,
-                   warn: Callable[[str], None] | None = None) -> bytes:
+                   warn: Callable[[str], None] | None = None,
+                   syntax_check: bool = False) -> bytes:
     """Encode numbered ASCII BASIC as Sinclair line records (no TAP header)."""
     records = bytearray()
     previous = -1
@@ -414,7 +415,11 @@ def encode_program(listing: str, *, case_insensitive: bool = False,
         records.extend(number.to_bytes(2, 'big') + len(result).to_bytes(2, 'little') + result)
         if len(records) > 41500:
             raise BAS2TAPError(f'Line {number}: program exceeds original C 41500-byte limit')
-    return bytes(records)
+    result = bytes(records)
+    if syntax_check:
+        from bas2tap_syntax import check_program
+        check_program(result)
+    return result
 
 
 def _block(flag: int, data: bytes) -> bytes:
@@ -445,9 +450,11 @@ def make_tap(program: bytes, *, name: str = '', autostart: int = 0x8000) -> byte
 
 def convert(source: str, *, name: str = '', autostart: int = 0x8000,
             case_insensitive: bool = False,
-            warn: Callable[[str], None] | None = None) -> bytes:
+            warn: Callable[[str], None] | None = None,
+            syntax_check: bool = False) -> bytes:
     """Full in-memory BAS-to-TAP conversion, without external subprocesses."""
-    return make_tap(encode_program(source, case_insensitive=case_insensitive, warn=warn),
+    return make_tap(encode_program(source, case_insensitive=case_insensitive, warn=warn,
+                                   syntax_check=syntax_check),
                     name=name, autostart=autostart)
 
 
@@ -457,21 +464,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('-w', action='store_true', help='suppress warnings')
     parser.add_argument('-e', action='store_true', help='send errors to stdout')
     parser.add_argument('-c', action='store_true', help='case-insensitive keywords')
-    parser.add_argument('-n', action='store_true', help='tokenization-only (C syntax checker is not yet ported)')
+    parser.add_argument('-n', action='store_true', help='disable original C-compatible BASIC syntax checking')
     parser.add_argument('-s', metavar='NAME', default='', help='tape header name (max 10 characters)')
     parser.add_argument('-a', metavar='LINE', type=int, default=0x8000, help='auto-start line')
     parser.add_argument('input', type=Path)
     parser.add_argument('output', nargs='?', type=Path)
     args = parser.parse_args(argv)
-    if not args.n:
-        parser.error('the C syntax checker is not ported; use -n and validate with the Spectrum ROM')
     output = args.output or args.input.with_suffix('.tap')
     if output.suffix.lower() != '.tap':
         output = output.with_suffix('.tap')
     try:
         listing = args.input.read_text(encoding='ascii')
         result = convert(listing, name=args.s, autostart=args.a, case_insensitive=args.c,
-                         warn=None if args.w else print)
+                         warn=None if args.w else print,
+                         syntax_check=not args.n)
         if args.input.resolve() == output.resolve():
             raise BAS2TAPError('Output would overwrite the BASIC listing')
         output.write_bytes(result)
