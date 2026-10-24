@@ -195,17 +195,19 @@ class _Parser:
                 self.fail('Slice values must be numeric')
         self.expect(41)
 
-    def expr(self, *, keyword: int = 0, open_bracket=False) -> bool:
+    def expr(self, *, keyword: int = 0, open_bracket=False,
+             numeric_expected=False) -> bool:
         """ScanExpression: return True for numeric, False for string."""
         self.depth += 1
         if self.depth > 150:
             self.fail('Expression recursion limit')
         try:
-            return self._expr(keyword,open_bracket)
+            return self._expr(keyword,open_bracket,numeric_expected)
         finally:
             self.depth -= 1
 
-    def _expr(self, keyword: int, open_bracket: bool) -> bool:
+    def _expr(self, keyword: int, open_bracket: bool,
+              numeric_expected: bool) -> bool:
         typename = None
         result_type = None
         expect_operand = True
@@ -264,7 +266,7 @@ class _Parser:
                 if b == 0xC5:
                     if keyword == 0xC6 and typename is False and result_type is not True:
                         self.fail('AND requires numeric right value')
-                    if result_type is not True and keyword != 0xC6 and not last_parenthetical:
+                    if result_type is not True and keyword != 0xC6 and not numeric_expected:
                         self.fail('OR requires numeric left value')
                 right_type = self.expr(keyword=b)
                 if not right_type:
@@ -327,7 +329,7 @@ class _Parser:
         self.fail(f'Unexpected token {self.tok()!r}')
 
     def numeric(self, keyword=0):
-        if not self.expr(keyword=keyword):
+        if not self.expr(keyword=keyword,numeric_expected=True):
             if keyword != 0xC0:
                 self.fail('Expected numeric expression')
 
