@@ -1,0 +1,420 @@
+#!/usr/bin/env python3
+"""Pure-Python BAS2TAP 2.6 BASIC tokenizer and TAP encoder.
+
+Ported from Martijn van der Heide's BAS2TAP 2.6 (bas2tap.c, 2013), in
+https://github.com/tuklusan/bas2tap . GPL-2.0-or-later, see LICENSE.
+
+Converts numbered ASCII Spectrum BASIC listings to native tokenized BASIC and
+Spectrum TAP blocks. No compiler, third-party Python module, or Javascript is
+needed. The separate C syntax checker is NOT implemented by this module;
+clients such as RBC should validate tokens with the actual Spectrum ROM.
+"""
+from __future__ import annotations
+
+import argparse
+import math
+import re
+import sys
+from pathlib import Path
+
+# The exact Sinclair token order from the TokenMap[0xA3..0xFF] in bas2tap.c.
+TOKEN_WORDS = ("SPECTRUM|PLAY|RND|INKEY$|PI|FN|POINT|SCREEN$|ATTR|AT|TAB|"
+               "VAL$|CODE|VAL|LEN|SIN|COS|TAN|ASN|ACS|ATN|LN|EXP|INT|SQR|SGN|"
+               "ABS|PEEK|IN|USR|STR$|CHR$|NOT|BIN|OR|AND|<=|>=|<>|LINE|THEN|"
+               "TO|STEP|DEF FN|CAT|FORMAT|MOVE|ERASE|OPEN #|CLOSE #|MERGE|"
+               "VERIFY|BEEP|CIRCLE|INK|PAPER|FLASH|BRIGHT|INVERSE|OVER|OUT|"
+               "LPRINT|LLIST|STOP|READ|DATA|RESTORE|NEW|BORDER|CONTINUE|DIM|"
+               "REM|FOR|GO TO|GO SUB|INPUT|LOAD|LIST|LET|PAUSE|NEXT|POKE|"
+               "PRINT|PLOT|RUN|SAVE|RANDOMIZE|IF|CLS|DRAW|CLEAR|RETURN|COPY").split('|')
+TOKENS = {i + 0xA3: word for i, word in enumerate(TOKEN_WORDS)}
+assert len(TOKENS) == 93 and TOKENS[0xCB] == 'THEN' and TOKENS[0xEA] == 'REM'
+MATCH_ORDER = sorted(TOKENS.items(), key=lambda item: (-len(item[1]), item[0]))
+# Original TokenMap's TokenType values. Types 1 and 2 are statements;
+# type 1 is *not* allowed as an expression token.
+KEYWORDS = set(range(0xCE, 0x100))
+COLORS = {0xD9, 0xDA, 0xDB, 0xDC, 0xDD, 0xDE}
+COLORS.add(0xE4)   # DATA
+EXPR_ONLY = set(range(0xA5, 0xCE))
+EXPR_ONLY.discard(0xC4)  # BIN is a numeric introducer, not a keyword
+CONTROL = {'INK': 0x10, 'PAPER': 0x11, 'FLASH': 0x12,
+           'BRIGHT': 0x13, 'INVERSE': 0x14, 'OVER': 0x15,
+           'AT': 0x16, 'TAB': 0x17}
+NUMBER = re.compile(r'(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]*)(?:[eE][+-]?[0-9]*)?')
+LINE_NO = re.compile(r' *([0-9]+) *')
+HEX = set('0123456789abcdefABCDEF')
+
+
+class BAS2TAPError(ValueError):
+    """Rejected input includes the BASIC line number when available."""
+
+
+def _float_cache(value: float, number: int) -> bytes:
+    """The original HandleNumbers' five-byte Sinclair numeric cache."""
+    if not math.isfinite(value):
+        raise BAS2TAPError(f'Line {number}: nonfinite number')
+    if value == math.floor(value) and -65536 <= value < 65536:
+        n = int(value)
+        if n < 0:
+            n = (n + 65536) & 0xffff
+        return bytes((14, 0, 0, n & 255, (n >> 8) & 255, 0))
+    if value == 0:
+        return bytes((14, 0, 0, 0, 0, 0))
+    exponent = math.floor(math.log2(abs(value)))
+    if not (-129 <= exponent <= 126):
+        raise BAS2TAPError(f'Line {number}: number outside Spectrum range')
+    mantissa = math.floor((abs(value) / 2 ** exponent - 1.0) * 2147483648.0 + 0.5)
+    return bytes((14, (exponent + 0x81) & 255,
+                  (mantissa >> 24 & 0x7f) | (0x80 if value < 0 else 0),
+                  mantissa >> 16 & 255, mantissa >> 8 & 255, mantissa & 255))
+
+
+def _prepare_line(raw: str, ascii_line: int) -> tuple[int, str] | None:
+    """Port of PrepareLine / GetLineNumber, including BAS2TAP's spaces."""
+    if any((ord(c) < 32 and c != '\t') or ord(c) >= 127 for c in raw):
+        raise BAS2TAPError(f'ASCII line {ascii_line}: invalid character')
+    out = []
+    string = remark = spaced = False
+    pos = 0
+    while pos < len(raw):
+        c = raw[pos]
+        if c == '\t':
+            out.append('\x06')
+            pos += 1
+            continue
+        if not remark and (raw[pos:pos + 5].upper() in (' REM ', ':REM ')):
+            remark = True
+        if string or remark:
+            out.append(c)
+        elif c == ' ':
+            if not spaced:
+                out.append(c)
+                spaced = True
+        else:
+            spaced = False
+            out.append(c)
+        if c == '"' and not remark:
+            string = not string
+        pos += 1
+    line = ''.join(out)
+    m = LINE_NO.match(line)
+    if not m:
+        if not line.strip():
+            return None
+        raise BAS2TAPError(f'ASCII line {ascii_line}: missing line number')
+    number = int(m.group(1))
+    if number > 9999:
+        raise BAS2TAPError(f'Line {number}: line number exceeds 9999')
+    if string:
+        raise BAS2TAPError(f'Line {number}: missing terminating quote')
+    if m.end() == len(line):
+        raise BAS2TAPError(f'Line {number}: no statements')
+    return number, line[m.end():]
+
+
+def _expand(text: str, pos: int, *, strip: bool) -> tuple[bytes, int] | None:
+    """Port of ExpandSequences. Raw brace escapes work in strings and REM."""
+    if pos >= len(text) or text[pos] != '{':
+        return None
+    remaining = text[pos:]
+    top = remaining.upper()
+    value = None
+    end = None
+    for label, byte in (('{CODE}', 0xAF), ('{CAT}', 0xCF), ('{(C)}', 0x7F)):
+        if top.startswith(label):
+            value, end = bytes((byte,)), pos + len(label)
+            break
+    if value is None and len(remaining) >= 3 and remaining[2] == '}' and 'A' <= top[1] <= 'U':
+        value, end = bytes((0x90 + ord(top[1]) - 65,)), pos + 3
+    if value is None and len(remaining) >= 4 and remaining[3] == '}' and remaining[1] in '+-' and remaining[2] in '12345678':
+        x = int(remaining[2]) % 8
+        value = bytes((0x88 + (x ^ 7) if remaining[1] == '+' else 0x80 + x,))
+        end = pos + 4
+    if value is None and len(remaining) >= 4 and remaining[3] == '}' and all(c in HEX for c in remaining[1:3]):
+        value, end = bytes((int(remaining[1:3], 16),)), pos + 4
+    if value is None:
+        for name, byte in CONTROL.items():
+            if not top.startswith('{' + name):
+                continue
+            # Keep C behavior: names are a prefix, not a regex word boundary.
+            p = pos + len(name) + 1
+            while p < len(text) and text[p] == ' ':
+                p += 1
+            start = p
+            while p < len(text) and text[p].isdigit():
+                p += 1
+            a = int(text[start:p] or '0') & 255
+            v = [byte, a]
+            if byte in (0x16, 0x17):
+                if p >= len(text) or text[p] != ',':
+                    continue
+                p += 1
+                while p < len(text) and text[p] == ' ':
+                    p += 1
+                start = p
+                while p < len(text) and text[p].isdigit():
+                    p += 1
+                v.append(int(text[start:p] or '0') & 255)
+            if p < len(text) and text[p] == '}':
+                value, end = bytes(v), p + 1
+                break
+    if value is None:
+        return None
+    if strip and end is not None:
+        while end < len(text) and text[end] == ' ':
+            end += 1
+    return value, end
+
+
+def _match(text: str, pos: int, case_insensitive: bool) -> tuple[int, int] | None:
+    """Port of MatchToken's longest match and alpha/alpha boundary rule."""
+    if text[pos] == ':':
+        end = pos + 1
+        while end < len(text) and text[end] == ' ':
+            end += 1
+        return 58, end
+    for code, word in MATCH_ORDER:
+        frag = text[pos:pos + len(word)]
+        if (frag.upper() if case_insensitive else frag) != word:
+            continue
+        end = pos + len(word)
+        if word[-1].isalpha() and end < len(text) and text[end].isalpha():
+            continue
+        while end < len(text) and text[end] == ' ':
+            end += 1
+        return code, end
+    return None
+
+
+def tokenize_line(text: str, *, line_number: int = 10, case_insensitive: bool = False) -> bytes:
+    """BAS2TAP C's lexical logic, returning one encoded BASIC body + CR.
+
+    This is a tokenizer, not a BASIC syntax validator. Syntax should be
+    checked by the Spectrum ROM, or the C program when comparing fixtures.
+    """
+    if not text.isascii():
+        raise BAS2TAPError(f'Line {line_number}: non-ASCII BASIC')
+    encoded = bytearray()
+    pos = 0
+    expect_keyword = True
+    in_string = False
+    brackets = 0
+    subline = 1
+    def_fn = inside_fn = False
+    while pos < len(text):
+        c = text[pos]
+        if in_string:
+            if c == '"':
+                encoded.append(34)
+                pos += 1
+                in_string = False
+                while pos < len(text) and text[pos] == ' ':
+                    pos += 1
+            else:
+                expansion = _expand(text, pos, strip=False)
+                if expansion:
+                    value, pos = expansion
+                    encoded.extend(value)
+                else:
+                    encoded.append(ord(c))
+                    pos += 1
+            continue
+        if c == '"':
+            if expect_keyword:
+                raise BAS2TAPError(f'Line {line_number}, statement {subline}: expected keyword')
+            encoded.append(34)
+            in_string = True
+            pos += 1
+            continue
+        if expect_keyword:
+            hit = _match(text, pos, case_insensitive)
+            if not hit:
+                raise BAS2TAPError(f'Line {line_number}, statement {subline}: expected keyword near {text[pos:pos + 16]!r}')
+            token, pos = hit
+            # In original C keyword matching rejects TokenType=0, while the
+            # full syntax checker later catches misplaced expression tokens.
+            encoded.append(token)
+            if token != 58:
+                expect_keyword = False
+            if token == 0xCE:
+                def_fn, inside_fn = True, False
+            if token == 0xEA:
+                while pos < len(text):
+                    expansion = _expand(text, pos, strip=False)
+                    if expansion:
+                        value, pos = expansion
+                        encoded.extend(value)
+                    else:
+                        encoded.append(ord(text[pos]))
+                        pos += 1
+            continue
+        if c == '(':
+            brackets += 1
+            if def_fn and not inside_fn:
+                inside_fn = True
+            encoded.append(40)
+            pos += 1
+            continue
+        if c == ')':
+            if def_fn and inside_fn:
+                encoded.extend(b'\x0e\0\0\0\0\0')
+                inside_fn = def_fn = False
+            brackets -= 1
+            if brackets < 0:
+                raise BAS2TAPError(f'Line {line_number}: too many closing brackets')
+            encoded.append(41)
+            pos += 1
+            continue
+        if c == ',' and def_fn and inside_fn:
+            encoded.extend(b'\x0e\0\0\0\0\0,')
+            pos += 1
+            continue
+        hit = _match(text, pos, case_insensitive)
+        if hit:
+            token, pos = hit
+            if token in KEYWORDS and token not in COLORS:
+                raise BAS2TAPError(f'Line {line_number}, statement {subline}: unexpected keyword {TOKENS[token]}')
+            encoded.append(token)
+            if token in (58, 0xCB):
+                expect_keyword = True
+                def_fn = False
+                if brackets:
+                    raise BAS2TAPError(f'Line {line_number}: unclosed brackets before separator')
+                subline += 1
+                if subline > 127:
+                    raise BAS2TAPError(f'Line {line_number}: too many statements')
+            elif token == 0xC4:
+                value = 0
+                while pos < len(text) and text[pos] in '01':
+                    value = value * 2 + int(text[pos])
+                    if value > 65535:
+                        raise BAS2TAPError(f'Line {line_number}: BIN number exceeds 65535')
+                    encoded.append(ord(text[pos]))
+                    pos += 1
+                encoded.extend((14, 0, 0, value & 255, value >> 8, 0))
+            continue
+        if c in '0123456789.':
+            match = NUMBER.match(text, pos)
+            if match:
+                literal = match.group()
+                pos = match.end()
+                encoded.extend(literal.encode('ascii'))
+                try:
+                    value = float(literal)
+                except ValueError as exc:
+                    raise BAS2TAPError(f'Line {line_number}: invalid number {literal}') from exc
+                encoded.extend(_float_cache(value, line_number))
+                continue
+        expansion = _expand(text, pos, strip=True)
+        if expansion:
+            value, pos = expansion
+            encoded.extend(value)
+        elif c.isalpha():
+            # The C converter copies complete alphanumeric identifiers in one
+            # operation. Embedded keywords do NOT start inside a variable.
+            end = pos + 1
+            while end < len(text) and text[end].isascii() and text[end].isalnum():
+                end += 1
+            encoded.extend(text[pos:end].encode('ascii'))
+            pos = end
+        else:
+            encoded.append(ord(c))
+            pos += 1
+    if in_string:
+        raise BAS2TAPError(f'Line {line_number}: unclosed string')
+    if brackets:
+        raise BAS2TAPError(f'Line {line_number}: too few closing brackets')
+    encoded.append(13)
+    if len(encoded) > 65535:
+        raise BAS2TAPError(f'Line {line_number}: BASIC line too large')
+    return bytes(encoded)
+
+
+def encode_program(listing: str, *, case_insensitive: bool = False) -> bytes:
+    """Encode numbered ASCII BASIC as Sinclair line records (no TAP header)."""
+    records = bytearray()
+    previous = -1
+    for file_line, raw in enumerate(listing.splitlines(), 1):
+        if len(raw) >= 1024:
+            raise BAS2TAPError(f'ASCII line {file_line}: longer than 1023 characters')
+        item = _prepare_line(raw, file_line)
+        if item is None:
+            continue
+        number, body = item
+        if number < previous:
+            raise BAS2TAPError(f'Line {number}: smaller than previous line {previous}')
+        previous = number
+        result = tokenize_line(body, line_number=number, case_insensitive=case_insensitive)
+        records.extend(number.to_bytes(2, 'big') + len(result).to_bytes(2, 'little') + result)
+        if len(records) > 41500:
+            raise BAS2TAPError(f'Line {number}: program exceeds original C 41500-byte limit')
+    if not records:
+        raise BAS2TAPError('No BASIC lines')
+    return bytes(records)
+
+
+def _block(flag: int, data: bytes) -> bytes:
+    content = bytes((flag,)) + data
+    checksum = 0
+    for b in content:
+        checksum ^= b
+    size = len(content) + 1
+    if size > 65535:
+        raise BAS2TAPError('TAP block exceeds 65535 bytes')
+    return size.to_bytes(2, 'little') + content + bytes((checksum,))
+
+
+def make_tap(program: bytes, *, name: str = '', autostart: int = 0x8000) -> bytes:
+    """Port of TapeHeader and XOR parity generation (two ordinary TAP blocks)."""
+    if len(name) > 10 or not name.isascii():
+        raise BAS2TAPError('Tape name must be at most ten ASCII characters')
+    if autostart != 0x8000 and not 0 <= autostart <= 9999:
+        raise BAS2TAPError('Autostart must be a BASIC line number')
+    if len(program) > 41500:
+        raise BAS2TAPError('Program exceeds 41500-byte BAS2TAP limit')
+    header = bytes((0,)) + name.encode('ascii').ljust(10, b' ')
+    header += len(program).to_bytes(2, 'little')
+    header += autostart.to_bytes(2, 'little')
+    header += len(program).to_bytes(2, 'little')
+    return _block(0, header) + _block(255, program)
+
+
+def convert(source: str, *, name: str = '', autostart: int = 0x8000,
+            case_insensitive: bool = False) -> bytes:
+    """Full in-memory BAS-to-TAP conversion, without external subprocesses."""
+    return make_tap(encode_program(source, case_insensitive=case_insensitive),
+                    name=name, autostart=autostart)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description='Pure-Python BAS2TAP 2.6 tokenizer and TAP writer')
+    parser.add_argument('-q', action='store_true', help='quiet')
+    parser.add_argument('-w', action='store_true', help='disable warnings (reserved)')
+    parser.add_argument('-e', action='store_true', help='send errors to stdout')
+    parser.add_argument('-c', action='store_true', help='case-insensitive keywords')
+    parser.add_argument('-n', action='store_true', help='tokenization-only (C syntax checker is not yet ported)')
+    parser.add_argument('-s', metavar='NAME', default='', help='tape header name (max 10 characters)')
+    parser.add_argument('-a', metavar='LINE', type=int, default=0x8000, help='auto-start line')
+    parser.add_argument('input', type=Path)
+    parser.add_argument('output', nargs='?', type=Path)
+    args = parser.parse_args(argv)
+    if not args.n:
+        parser.error('the C syntax checker is not ported; use -n and validate with the Spectrum ROM')
+    output = args.output or args.input.with_suffix('.tap')
+    if output.suffix.lower() != '.tap':
+        output = output.with_suffix('.tap')
+    try:
+        listing = args.input.read_text(encoding='ascii')
+        result = convert(listing, name=args.s, autostart=args.a, case_insensitive=args.c)
+        if args.input.resolve() == output.resolve():
+            raise BAS2TAPError('Output would overwrite the BASIC listing')
+        output.write_bytes(result)
+    except (BAS2TAPError, UnicodeError, OSError) as exc:
+        print(f'BAS2TAP: {exc}', file=sys.stdout if args.e else sys.stderr)
+        return 1
+    if not args.q:
+        print(f'Wrote {output} ({len(result)} bytes)')
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())
