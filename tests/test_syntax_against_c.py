@@ -49,6 +49,8 @@ class CheckCSyntaxParity(unittest.TestCase):
             'GO SUB 100','GO TO 10','RUN','RANDOMIZE','RESTORE',
             'CLS:PRINT 1', 'STOP','CLEAR #','PRINT 3 OR 4',
             'PRINT 1 AND 2','PRINT "HELLO" AND 1','PRINT "HELLO" OR 1',
+            'PRINT (1) OR 2','PRINT (1=1) OR 2',
+            'PRINT INT (1=1 AND 1<2) OR 3',
             'PRINT INKEY$="A"', 'PRINT USR "a"','PRINT USR 32768',
             'DEF FN A(X)=X*X', 'DEF FN A(X$)=X$', 'DEF FN A()=1',
             'PLOT PAPER 3;INK 1;10,20','DRAW 1,2','DRAW 1,2,3',

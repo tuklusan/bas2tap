@@ -229,8 +229,13 @@ class _Parser:
                     if typename is False:
                         self.fail('Type conflict in expression')
                     continue
+                atom_start = self.pos
                 item_type = self.atom(keyword)
-                last_parenthetical = b == 40 and item_type is True
+                # The C scanner retains the numeric type from nested
+                # logical expressions while evaluating INT(...), too.
+                nested = self.data[atom_start:self.pos]
+                last_parenthetical = item_type is True and (
+                    b == 40 or (b in NUM_FN and 0xC6 in nested))
                 if typename is not None and item_type != typename:
                     self.fail('Type conflict in expression')
                 typename = item_type
