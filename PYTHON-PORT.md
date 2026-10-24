@@ -23,15 +23,16 @@ matching, statement boundaries, strings and remarks, line numbers, binary
 and decimal numeric caches, `DEF FN` parameter storage, UDG/graphics/control
 escapes, normal BASIC tape header blocks, auto-start line, and TAP XOR parity.
 
-**Current boundary:** the original C program's separate, extensive syntax
-checker for 48K/128K BASIC and expansion peripherals has **not** been ported.
-The Python CLI therefore requires `-n` (the C program's disable-syntax-check
-switch) and refuses to silently pass itself off as a full syntax checker.
-For ZX-UX RBC, the independently working original 48K ROM checker must validate
-the returned Sinclair token stream; no syntax validity is inferred from TAP
-conversion alone. For untrusted BASIC files, use a trusted ROM check before
-execution or compilation. The Python implementation has not yet been proved
-byte-for-byte equivalent to the C program over its full input domain.
+**Syntax checking:** the standalone pure-Python bas2tap_syntax.py now
+implements the original C statement and expression syntax checker, including
+variable and string forms, data definitions, and original cassette/extension
+syntax. The CLI validates by default and -n disables the syntax pass,
+matching the C command line. Library calls may request syntax_check=True.
+The independent 48K Spectrum ROM syntax checker must still be used by RBC;
+C-checker agreement does not replace ROM behavior.
+
+The C/Python source audit and differential suite in
+tests/test_syntax_against_c.py compare both acceptance and rejection.
 
 The Python port is upstream in this fork; it does **not** update RBC, the
 ZX-UX SDK, the frozen release or the original collection of BASIC/TZX files.

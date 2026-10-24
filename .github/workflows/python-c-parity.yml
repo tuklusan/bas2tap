@@ -1,9 +1,10 @@
 name: Python BAS2TAP parity against original C
 on:
   push:
-    branches: [master]
+    branches: [master, python-c-syntax-validation]
     paths:
       - bas2tap.py
+      - bas2tap_syntax.py
       - bas2tap.c
       - tests/**
       - .github/workflows/python-c-parity.yml
