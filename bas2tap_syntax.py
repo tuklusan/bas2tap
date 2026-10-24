@@ -212,8 +212,10 @@ class _Parser:
         while True:
             b = self.cur()
             if b in (13,58,41,44,59,39,0xCC,0xCD,0xCB) or (b in (0xC5,0xC6) and not has_operand):
+                # The C scanner returns its default numeric type for a
+                # missing operand. RBC separately enforces the ROM syntax.
                 if not has_operand or expect_operand:
-                    self.fail('Missing expression operand')
+                    return True
                 if open_bracket and b in (13,58):
                     self.fail('Too few closing brackets')
                 return result_type if result_type is not None else typename
@@ -241,7 +243,8 @@ class _Parser:
                 expect_operand = True
             elif b in (0xC5,0xC6):
                 self.step()
-                if b == 0xC5 and typename is False:
+                # Preserve original C handling of OR in expression contexts.
+                if b == 0xC5:
                     self.fail('OR requires numeric left value')
                 right_type = self.expr(keyword=b)
                 if not right_type:
