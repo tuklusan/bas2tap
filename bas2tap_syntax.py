@@ -244,8 +244,11 @@ class _Parser:
             elif b in (0xC5,0xC6):
                 self.step()
                 # Preserve original C handling of OR in expression contexts.
-                if b == 0xC5 and result_type is not True and keyword != 0xC6:
-                    self.fail('OR requires numeric left value')
+                if b == 0xC5:
+                    if keyword == 0xC6 and typename is False and result_type is not True:
+                        self.fail('AND requires numeric right value')
+                    if result_type is not True and keyword != 0xC6:
+                        self.fail('OR requires numeric left value')
                 right_type = self.expr(keyword=b)
                 if not right_type:
                     self.fail('AND/OR requires numeric right value')
