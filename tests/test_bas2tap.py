@@ -77,12 +77,36 @@ class TokenizerTests(unittest.TestCase):
         self.assertEqual(_expand('{F5}xxx', 0, strip=True), (b'\xf5', 4))
         self.assertEqual(_expand('{CODE}', 0, strip=True), (b'\xaf', 6))
 
+    def test_c_number_scanner_accepts_legacy_spellings(self):
+        for lexeme, numeric in (('.', 0), ('1e', 1), ('1E+', 1),
+                                ('1e-', 1), ('2.5e', 2.5)):
+            with self.subTest(lexeme=lexeme):
+                self.assertIn(lexeme.encode('ascii') + _float_cache(numeric, 10),
+                              tokenize_line('PRINT ' + lexeme))
+
+    def test_c_code_cat_escapes_keep_following_spaces(self):
+        self.assertEqual(tokenize_line('PRINT {CODE}  1'),
+                         b'\xf5\xaf  1' + _float_cache(1, 10) + b'\r')
+        self.assertEqual(tokenize_line('PRINT {CAT}  1'),
+                         b'\xf5\xcf  1' + _float_cache(1, 10) + b'\r')
+
+    def test_48k_udg_and_128k_token_conflict(self):
+        for s in ('10 PRINT "{T}"\n20 SPECTRUM 1',
+                  '10 PLAY "a"\n20 PRINT "{U}"'):
+            with self.subTest(s=s), self.assertRaisesRegex(BAS2TAPError, 'conflicts'):
+                encode_program(s)
+
+
 
 class ListingTests(unittest.TestCase):
     def test_line_structure(self):
         p = encode_program('10 PRINT "A"\n20 PRINT "B"\n')
         self.assertEqual(p[:4], b'\x00\x0a\x05\x00')
         self.assertIn(b'\x00\x14', p)
+
+    def test_line_only_after_first_line_in_tokenizer_mode(self):
+        data = encode_program('10 PRINT 1\n20')
+        self.assertEqual(data[-5:], b'\x00\x14\x01\x00\r')
 
     def test_blank_lines(self):
         self.assertEqual(encode_program('\n10 PRINT 1\n\n'), encode_program('10 PRINT 1'))

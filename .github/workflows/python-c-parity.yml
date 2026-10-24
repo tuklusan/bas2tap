@@ -1,0 +1,28 @@
+name: Python BAS2TAP parity against original C
+on:
+  push:
+    branches: [master]
+    paths:
+      - bas2tap.py
+      - bas2tap.c
+      - tests/**
+      - .github/workflows/python-c-parity.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  parity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Confirm unchanged BAS2TAP 2.6 C reference
+        shell: bash
+        run: test "$(git hash-object bas2tap.c)" = 0370b681d77833c37a0e6952401ef038a8e85c28
+      - name: Port regression and real C byte comparisons — pass 1
+        run: python -m unittest discover -s tests -v
+      - name: Reopen sources and repeat full comparison — pass 2
+        run: python -m unittest discover -s tests -v
