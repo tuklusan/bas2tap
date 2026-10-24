@@ -1,8 +1,5 @@
-===============================
 PYTHON PORT OF BAS2TAP
-===============================
 
----
 
 BAS2TAP v2.6                                                (Release 20-01-2013)
 Copyleft (C) 1998-2013 Martijn van der Heide, ThunderWare Research Center.
